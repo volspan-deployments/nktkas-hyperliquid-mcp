@@ -7,59 +7,42 @@ from fastmcp import FastMCP
 import httpx
 import os
 import json
-import time
-from typing import Optional, List, Any
+from typing import Optional
 
-mcp = FastMCP("hyperliquid-sdk")
+mcp = FastMCP("hyperliquid-api")
 
-HYPERLIQUID_MAINNET_URL = "https://api.hyperliquid.xyz"
-HYPERLIQUID_TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
+HL_MAINNET_URL = "https://api.hyperliquid.xyz"
+HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
 
-BASE_URL = os.environ.get("HYPERLIQUID_BASE_URL", HYPERLIQUID_MAINNET_URL)
-PRIVATE_KEY = os.environ.get("HYPERLIQUID_PRIVATE_KEY", "")
-WALLET_ADDRESS = os.environ.get("HYPERLIQUID_WALLET_ADDRESS", "")
-
-
-def get_nonce() -> int:
-    return int(time.time() * 1000)
+HL_BASE_URL = os.environ.get("HL_BASE_URL", HL_MAINNET_URL)
+HL_PRIVATE_KEY = os.environ.get("HL_PRIVATE_KEY", "")
+HL_WALLET_ADDRESS = os.environ.get("HL_WALLET_ADDRESS", "")
 
 
-async def post_exchange(action: dict, nonce: Optional[int] = None, vault_address: Optional[str] = None) -> dict:
-    """Send a signed action to the Hyperliquid exchange endpoint."""
-    if nonce is None:
-        nonce = get_nonce()
-
-    payload = {
-        "action": action,
-        "nonce": nonce,
-        "signature": {"r": "0x" + "0" * 64, "s": "0x" + "0" * 64, "v": 27},
-    }
-
-    if vault_address:
-        payload["vaultAddress"] = vault_address
-
-    headers = {}
-    if WALLET_ADDRESS:
-        headers["X-Wallet-Address"] = WALLET_ADDRESS
-    if PRIVATE_KEY:
-        headers["X-Private-Key"] = PRIVATE_KEY
-
+async def info_request(payload: dict) -> dict:
+    """Send a request to the Hyperliquid info endpoint."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{BASE_URL}/exchange",
+            f"{HL_BASE_URL}/info",
             json=payload,
-            headers=headers,
+            headers={"Content-Type": "application/json"}
         )
         response.raise_for_status()
         return response.json()
 
 
-async def post_info(body: dict) -> Any:
-    """Query the Hyperliquid info endpoint."""
+async def exchange_request(payload: dict) -> dict:
+    """Send a request to the Hyperliquid exchange endpoint.
+    
+    Note: Real trading requires cryptographic signing with a private key.
+    This implementation sends the action payload for demonstration.
+    Production use requires proper EIP-712 signing via viem/ethers.
+    """
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{BASE_URL}/info",
-            json=body,
+            f"{HL_BASE_URL}/exchange",
+            json=payload,
+            headers={"Content-Type": "application/json"}
         )
         response.raise_for_status()
         return response.json()
@@ -69,529 +52,512 @@ async def post_info(body: dict) -> Any:
 async def place_order(
     coin: str,
     is_buy: bool,
-    limit_px: str,
     sz: str,
-    order_type: str = "limit",
+    limit_px: str,
+    order_type: str = "Limit",
     reduce_only: bool = False,
-    cloid: Optional[str] = None,
+    cloid: Optional[str] = None
 ) -> dict:
+    """Place a new order or batch of orders on Hyperliquid exchange.
+    
+    Use this when the user wants to buy or sell assets, set limit orders,
+    market orders, or trigger orders. Supports all order types including
+    limit, market, stop-loss, and take-profit.
+    
+    Note: Actual order execution requires a configured private key and
+    proper EIP-712 signing. This tool constructs and submits the order payload.
     """
-    Place a new order on the Hyperliquid exchange.
-    
-    Supports limit, market, and stop orders. Use this when the user wants to
-    buy or sell assets, set limit/market orders, or execute trading strategies.
-    
-    Args:
-        coin: The trading pair/coin symbol (e.g., 'BTC', 'ETH')
-        is_buy: True for buy order, False for sell order
-        limit_px: Limit price as a decimal string (e.g., '42000.5')
-        sz: Order size/quantity as a decimal string (e.g., '0.1')
-        order_type: Order type: 'limit', 'market', or 'stop'. Defaults to 'limit'.
-        reduce_only: If True, the order will only reduce an existing position
-        cloid: Optional client order ID for tracking (hex string, 34 chars)
-    
-    Returns:
-        Exchange response with order status
-    """
-    if order_type == "limit":
-        tif_type = {"limit": {"tif": "Gtc"}}
-    elif order_type == "market":
-        tif_type = {"limit": {"tif": "Ioc"}}
-    else:
-        tif_type = {"limit": {"tif": "Gtc"}}
-
-    order_obj: dict = {
-        "a": coin,
-        "b": is_buy,
-        "p": limit_px,
-        "s": sz,
-        "r": reduce_only,
-        "t": tif_type,
+    # Map order_type string to Hyperliquid tif/trigger format
+    order_type_map = {
+        "Limit": {"limit": {"tif": "Gtc"}},
+        "Market": {"limit": {"tif": "Ioc"}},
+        "StopMarket": {"trigger": {"triggerPx": limit_px, "isMarket": True, "tpsl": "sl"}},
+        "StopLimit": {"trigger": {"triggerPx": limit_px, "isMarket": False, "tpsl": "sl"}},
+        "TakeProfitMarket": {"trigger": {"triggerPx": limit_px, "isMarket": True, "tpsl": "tp"}},
+        "TakeProfitLimit": {"trigger": {"triggerPx": limit_px, "isMarket": False, "tpsl": "tp"}},
     }
-
+    
+    t = order_type_map.get(order_type, {"limit": {"tif": "Gtc"}})
+    
+    order = {
+        "coin": coin,
+        "isBuy": is_buy,
+        "sz": sz,
+        "limitPx": limit_px,
+        "orderType": t,
+        "reduceOnly": reduce_only,
+    }
+    
     if cloid:
-        order_obj["c"] = cloid
-
+        order["cloid"] = cloid
+    
     action = {
         "type": "order",
-        "orders": [order_obj],
-        "grouping": "na",
+        "orders": [order],
+        "grouping": "na"
     }
-
-    try:
-        result = await post_exchange(action)
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
         return {
-            "success": True,
-            "action": "place_order",
-            "coin": coin,
-            "is_buy": is_buy,
-            "limit_px": limit_px,
-            "sz": sz,
-            "order_type": order_type,
-            "reduce_only": reduce_only,
-            "result": result,
-            "note": "Order placed. In production, ensure you sign transactions with your private key."
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
+            "status": "error",
+            "message": "Trading requires HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
             "action_payload": action,
-            "note": "This server provides action structure. Actual trading requires cryptographic signing via the Hyperliquid TypeScript/Python SDK."
+            "note": "Configure environment variables and use proper EIP-712 signing for live trading."
         }
-
-
-@mcp.tool()
-async def batch_modify_orders(
-    modifies: List[dict],
-    cancels: Optional[List[dict]] = None,
-    orders: Optional[List[dict]] = None,
-) -> dict:
-    """
-    Modify, cancel, or place multiple orders in a single atomic batch operation.
     
-    Use this for efficiently updating multiple open orders at once, or when
-    combining order placements and cancellations to minimize fees and latency.
+    payload = {
+        "action": action,
+        "nonce": int(__import__('time').time() * 1000),
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
     
-    Args:
-        modifies: Array of order modification objects, each containing oid (order ID),
-                  coin, is_buy, limit_px, sz, and optional fields
-        cancels: Optional array of cancel objects, each with coin and oid to cancel
-        orders: Optional array of new order objects to place as part of the batch
-    
-    Returns:
-        Exchange response with batch operation results
-    """
-    batch_actions = []
-
-    if cancels:
-        for cancel in cancels:
-            batch_actions.append({
-                "type": "cancel",
-                "cancels": [{"a": cancel.get("coin"), "o": cancel.get("oid")}],
-            })
-
-    for modify in modifies:
-        order_obj: dict = {
-            "a": modify.get("coin"),
-            "b": modify.get("is_buy"),
-            "p": modify.get("limit_px"),
-            "s": modify.get("sz"),
-            "r": modify.get("reduce_only", False),
-            "t": {"limit": {"tif": "Gtc"}},
-        }
-        if modify.get("cloid"):
-            order_obj["c"] = modify["cloid"]
-
-        batch_actions.append({
-            "type": "batchModify",
-            "modifies": [{
-                "oid": modify.get("oid"),
-                "order": order_obj,
-            }],
-        })
-
-    if orders:
-        new_orders = []
-        for o in orders:
-            new_order: dict = {
-                "a": o.get("coin"),
-                "b": o.get("is_buy"),
-                "p": o.get("limit_px"),
-                "s": o.get("sz"),
-                "r": o.get("reduce_only", False),
-                "t": {"limit": {"tif": "Gtc"}},
-            }
-            if o.get("cloid"):
-                new_order["c"] = o["cloid"]
-            new_orders.append(new_order)
-
-        batch_actions.append({
-            "type": "order",
-            "orders": new_orders,
-            "grouping": "na",
-        })
-
     try:
-        results = []
-        for action in batch_actions:
-            result = await post_exchange(action)
-            results.append(result)
-
-        return {
-            "success": True,
-            "action": "batch_modify_orders",
-            "batch_count": len(batch_actions),
-            "results": results,
-            "note": "Batch operations processed. In production, sign transactions with your private key."
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
     except Exception as e:
         return {
-            "success": False,
-            "error": str(e),
-            "batch_actions": batch_actions,
-            "note": "This server provides action structure. Actual batch trading requires cryptographic signing."
+            "status": "error",
+            "message": str(e),
+            "action_payload": action,
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
         }
 
 
 @mcp.tool()
-async def borrow_or_lend(
+async def cancel_order(
     coin: str,
-    is_borrow: bool,
-    amount: str,
+    oid: Optional[int] = None,
+    cloid: Optional[str] = None
 ) -> dict:
+    """Cancel one or more existing open orders on Hyperliquid.
+    
+    Use this when the user wants to cancel pending orders by order ID
+    or client order ID. Either oid or cloid must be provided.
     """
-    Borrow or lend assets on Hyperliquid's lending/borrowing platform.
-    
-    Use this when the user wants to earn yield by lending assets or leverage
-    their position by borrowing. Corresponds to the borrowLend exchange method.
-    
-    Args:
-        coin: The asset to borrow or lend (e.g., 'USDC', 'ETH')
-        is_borrow: True to borrow the asset, False to lend it
-        amount: Amount to borrow or lend as a decimal string
-    
-    Returns:
-        Exchange response with borrow/lend status
-    """
-    action = {
-        "type": "borrowLend",
-        "coin": coin,
-        "isBorrow": is_borrow,
-        "amount": amount,
-    }
-
-    try:
-        result = await post_exchange(action)
+    if oid is None and cloid is None:
         return {
-            "success": True,
-            "action": "borrow_or_lend",
+            "status": "error",
+            "message": "Either 'oid' (order ID) or 'cloid' (client order ID) must be provided."
+        }
+    
+    if cloid:
+        cancel = {"coin": coin, "cloid": cloid}
+        action = {"type": "cancelByCloid", "cancels": [cancel]}
+    else:
+        cancel = {"coin": coin, "oid": oid}
+        action = {"type": "cancel", "cancels": [cancel]}
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
+        return {
+            "status": "error",
+            "message": "Cancel order requires HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
+            "action_payload": action,
+            "note": "Configure environment variables and use proper EIP-712 signing for live trading."
+        }
+    
+    payload = {
+        "action": action,
+        "nonce": int(__import__('time').time() * 1000),
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
+    
+    try:
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "action_payload": action,
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
+        }
+
+
+@mcp.tool()
+async def modify_order(
+    oid: int,
+    coin: str,
+    is_buy: bool,
+    sz: str,
+    limit_px: str,
+    order_type: str = "Limit",
+    reduce_only: bool = False
+) -> dict:
+    """Modify one or more existing open orders (batch modify).
+    
+    Use this when the user wants to update price, size, or other parameters
+    of existing orders without cancelling and re-placing them.
+    """
+    order_type_map = {
+        "Limit": {"limit": {"tif": "Gtc"}},
+        "Market": {"limit": {"tif": "Ioc"}},
+        "StopMarket": {"trigger": {"triggerPx": limit_px, "isMarket": True, "tpsl": "sl"}},
+        "StopLimit": {"trigger": {"triggerPx": limit_px, "isMarket": False, "tpsl": "sl"}},
+        "TakeProfitMarket": {"trigger": {"triggerPx": limit_px, "isMarket": True, "tpsl": "tp"}},
+        "TakeProfitLimit": {"trigger": {"triggerPx": limit_px, "isMarket": False, "tpsl": "tp"}},
+    }
+    
+    t = order_type_map.get(order_type, {"limit": {"tif": "Gtc"}})
+    
+    modify = {
+        "oid": oid,
+        "order": {
             "coin": coin,
-            "is_borrow": is_borrow,
-            "amount": amount,
-            "operation": "borrow" if is_borrow else "lend",
-            "result": result,
+            "isBuy": is_buy,
+            "sz": sz,
+            "limitPx": limit_px,
+            "orderType": t,
+            "reduceOnly": reduce_only,
         }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "action_payload": action,
-            "note": "BorrowLend action structure built. Production use requires signing via Hyperliquid SDK."
-        }
-
-
-@mcp.tool()
-async def approve_agent(
-    agent_address: str,
-    agent_name: Optional[str] = None,
-    extra_agent_name: Optional[str] = None,
-) -> dict:
-    """
-    Approve an agent address to act on behalf of your account for trading operations.
-    
-    Use this when setting up automated trading bots, sub-accounts, or delegating
-    trading authority to another address. Corresponds to the approveAgent exchange method.
-    
-    Args:
-        agent_address: The Ethereum address of the agent to approve (hex string starting with 0x)
-        agent_name: Optional human-readable name for the agent
-        extra_agent_name: Optional secondary name or label for the agent
-    
-    Returns:
-        Exchange response with agent approval status
-    """
-    action: dict = {
-        "type": "approveAgent",
-        "agentAddress": agent_address,
     }
-
-    if agent_name:
-        action["agentName"] = agent_name
-    if extra_agent_name:
-        action["extraAgentName"] = extra_agent_name
-
-    try:
-        result = await post_exchange(action)
-        return {
-            "success": True,
-            "action": "approve_agent",
-            "agent_address": agent_address,
-            "agent_name": agent_name,
-            "result": result,
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "action_payload": action,
-            "note": "ApproveAgent action structure built. Production use requires signing via Hyperliquid SDK."
-        }
-
-
-@mcp.tool()
-async def approve_builder_fee(
-    builder: str,
-    max_fee_rate: str,
-) -> dict:
-    """
-    Approve a builder fee for a specific builder address.
     
-    Allows them to collect fees on trades routed through their interface.
-    Use this when integrating with a frontend builder or setting up fee sharing.
-    
-    Args:
-        builder: The Ethereum address of the builder to approve fees for (hex string)
-        max_fee_rate: Maximum fee rate the builder can charge, as a decimal string
-                      (e.g., '0.001' for 0.1%)
-    
-    Returns:
-        Exchange response with builder fee approval status
-    """
     action = {
-        "type": "approveBuilderFee",
-        "builder": builder,
-        "maxFeeRate": max_fee_rate,
+        "type": "batchModify",
+        "modifies": [modify]
     }
-
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
+        return {
+            "status": "error",
+            "message": "Modify order requires HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
+            "action_payload": action,
+            "note": "Configure environment variables and use proper EIP-712 signing for live trading."
+        }
+    
+    payload = {
+        "action": action,
+        "nonce": int(__import__('time').time() * 1000),
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
+    
     try:
-        result = await post_exchange(action)
-        return {
-            "success": True,
-            "action": "approve_builder_fee",
-            "builder": builder,
-            "max_fee_rate": max_fee_rate,
-            "result": result,
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
     except Exception as e:
         return {
-            "success": False,
-            "error": str(e),
+            "status": "error",
+            "message": str(e),
             "action_payload": action,
-            "note": "ApproveBuilderFee action structure built. Production use requires signing via Hyperliquid SDK."
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
         }
 
 
 @mcp.tool()
-async def cross_transfer(
-    usdc: str,
-    to_perp: bool,
+async def get_market_info(
+    query_type: str,
+    coin: Optional[str] = None
 ) -> dict:
+    """Retrieve market data from Hyperliquid including mid prices for all coins,
+    L2 order book snapshots, or recent trades.
+    
+    Use this when the user asks about current prices, market depth,
+    or recent trading activity.
+    
+    query_type options:
+    - 'allMids': Get mid prices for all listed coins
+    - 'l2Book': Get L2 order book snapshot for a specific coin (requires coin param)
+    - 'recentTrades': Get recent trades for a specific coin (requires coin param)
     """
-    Deposit or withdraw funds to/from cross-margin account (cDeposit).
+    if query_type == "allMids":
+        payload = {"type": "allMids"}
+    elif query_type == "l2Book":
+        if not coin:
+            return {"status": "error", "message": "'coin' parameter is required for l2Book query."}
+        payload = {"type": "l2Book", "coin": coin}
+    elif query_type == "recentTrades":
+        if not coin:
+            return {"status": "error", "message": "'coin' parameter is required for recentTrades query."}
+        payload = {"type": "recentTrades", "coin": coin}
+    else:
+        return {
+            "status": "error",
+            "message": f"Unknown query_type '{query_type}'. Valid options: 'allMids', 'l2Book', 'recentTrades'"
+        }
     
-    Use this to move assets between spot wallet and cross-margin trading account,
-    enabling leveraged trading or withdrawing profits.
-    
-    Args:
-        usdc: Amount of USDC to deposit or withdraw as a decimal string
-        to_perp: True to deposit into perpetuals/cross-margin, False to withdraw back to spot
-    
-    Returns:
-        Exchange response with transfer status
-    """
-    action = {
-        "type": "cDeposit",
-        "usdc": usdc,
-        "toPerp": to_perp,
-    }
-
     try:
-        result = await post_exchange(action)
-        return {
-            "success": True,
-            "action": "cross_transfer",
-            "usdc": usdc,
-            "direction": "deposit to perp" if to_perp else "withdraw from perp",
-            "result": result,
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
+        result = await info_request(payload)
+        return {"status": "success", "query_type": query_type, "coin": coin, "data": result}
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "action_payload": action,
-            "note": "cDeposit action structure built. Production use requires signing via Hyperliquid SDK."
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-async def configure_dex_abstraction(
+async def get_user_state(
+    user_address: str,
+    query_type: str = "clearinghouseState"
+) -> dict:
+    """Retrieve a user's account state on Hyperliquid including open positions,
+    balances, margin information, and open orders.
+    
+    Use this when the user wants to check their portfolio, positions, P&L,
+    or available margin.
+    
+    query_type options:
+    - 'clearinghouseState': Get positions and balances (default)
+    - 'openOrders': Get all pending/open orders
+    - 'userFills': Get trade/fill history
+    """
+    query_map = {
+        "clearinghouseState": {"type": "clearinghouseState", "user": user_address},
+        "openOrders": {"type": "openOrders", "user": user_address},
+        "userFills": {"type": "userFills", "user": user_address},
+    }
+    
+    if query_type not in query_map:
+        return {
+            "status": "error",
+            "message": f"Unknown query_type '{query_type}'. Valid options: 'clearinghouseState', 'openOrders', 'userFills'"
+        }
+    
+    payload = query_map[query_type]
+    
+    try:
+        result = await info_request(payload)
+        return {
+            "status": "success",
+            "user_address": user_address,
+            "query_type": query_type,
+            "data": result
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+async def transfer_funds(
     action_type: str,
-    agent_address: str,
-    abstraction_config: Optional[str] = None,
+    amount: str,
+    asset: str = "USDC",
+    destination: Optional[str] = None
 ) -> dict:
+    """Deposit or withdraw funds on Hyperliquid, including cross-chain deposits
+    (cDeposit) and borrow/lend operations.
+    
+    Use this when the user wants to move funds into or out of their trading
+    account or manage lending positions.
+    
+    action_type options:
+    - 'deposit': Add funds to trading account
+    - 'withdraw': Remove funds from trading account (requires destination)
+    - 'borrowLend': Lending operations
+    - 'cDeposit': Cross-chain deposit
     """
-    Enable or configure DEX abstraction settings for an agent.
-    
-    Includes agentEnableDexAbstraction and agentSetAbstraction. Use this when
-    setting up automated DEX routing, configuring agent trading permissions,
-    or enabling abstracted DEX interactions.
-    
-    Args:
-        action_type: Type of abstraction action: 'enable' to enable DEX abstraction,
-                     or 'set' to configure abstraction parameters
-        agent_address: The agent address to configure DEX abstraction for (hex string)
-        abstraction_config: Optional JSON string containing abstraction configuration
-                            parameters when action_type is 'set'
-    
-    Returns:
-        Exchange response with DEX abstraction configuration status
-    """
-    if action_type == "enable":
+    if action_type == "withdraw":
+        if not destination:
+            return {
+                "status": "error",
+                "message": "'destination' address is required for withdrawal operations."
+            }
         action = {
-            "type": "agentEnableDexAbstraction",
-            "agentAddress": agent_address,
+            "type": "withdraw3",
+            "destination": destination,
+            "amount": amount,
+            "time": int(__import__('time').time() * 1000)
         }
-    elif action_type == "set":
-        config = {}
-        if abstraction_config:
-            try:
-                config = json.loads(abstraction_config)
-            except json.JSONDecodeError as e:
-                return {
-                    "success": False,
-                    "error": f"Invalid JSON in abstraction_config: {str(e)}",
-                }
-
+    elif action_type == "deposit":
         action = {
-            "type": "agentSetAbstraction",
-            "agentAddress": agent_address,
-            **config,
+            "type": "usdClassTransfer",
+            "amount": amount,
+            "toPerp": True
+        }
+    elif action_type == "borrowLend":
+        action = {
+            "type": "borrowOrLend",
+            "isBorrow": True,
+            "amount": amount,
+            "asset": asset
+        }
+    elif action_type == "cDeposit":
+        action = {
+            "type": "cDeposit",
+            "amount": amount,
+            "asset": asset
         }
     else:
         return {
-            "success": False,
-            "error": f"Invalid action_type '{action_type}'. Must be 'enable' or 'set'.",
+            "status": "error",
+            "message": f"Unknown action_type '{action_type}'. Valid options: 'deposit', 'withdraw', 'borrowLend', 'cDeposit'"
         }
-
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
+        return {
+            "status": "error",
+            "message": "Fund transfers require HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
+            "action_payload": action,
+            "note": "Configure environment variables and use proper EIP-712 signing for authenticated operations."
+        }
+    
+    payload = {
+        "action": action,
+        "nonce": int(__import__('time').time() * 1000),
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
+    
     try:
-        result = await post_exchange(action)
-        return {
-            "success": True,
-            "action": "configure_dex_abstraction",
-            "action_type": action_type,
-            "agent_address": agent_address,
-            "result": result,
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
     except Exception as e:
         return {
-            "success": False,
-            "error": str(e),
+            "status": "error",
+            "message": str(e),
             "action_payload": action,
-            "note": "DEX abstraction action structure built. Production use requires signing via Hyperliquid SDK."
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
+        }
+
+
+@mcp.tool()
+async def manage_agent(
+    action: str,
+    agent_address: str,
+    agent_name: Optional[str] = None,
+    extra_params: Optional[str] = None
+) -> dict:
+    """Manage agent permissions on Hyperliquid including approving agents,
+    enabling DEX abstraction for agents, and setting agent abstraction parameters.
+    
+    Use this when the user wants to configure automated trading agents or
+    approve third-party agents to trade on their behalf.
+    
+    action options:
+    - 'approveAgent': Grant agent permissions to an address
+    - 'agentEnableDexAbstraction': Enable DEX abstraction for an agent
+    - 'agentSetAbstraction': Configure abstraction settings
+    - 'approveBuilderFee': Approve builder fees for an agent
+    """
+    extra = {}
+    if extra_params:
+        try:
+            extra = json.loads(extra_params)
+        except json.JSONDecodeError:
+            return {
+                "status": "error",
+                "message": "extra_params must be a valid JSON string."
+            }
+    
+    if action == "approveAgent":
+        action_payload = {
+            "type": "approveAgent",
+            "agentAddress": agent_address,
+            "agentName": agent_name or "",
+            **extra
+        }
+    elif action == "agentEnableDexAbstraction":
+        action_payload = {
+            "type": "agentEnableDexAbstraction",
+            "agentAddress": agent_address,
+            **extra
+        }
+    elif action == "agentSetAbstraction":
+        action_payload = {
+            "type": "agentSetAbstraction",
+            "agentAddress": agent_address,
+            **extra
+        }
+    elif action == "approveBuilderFee":
+        action_payload = {
+            "type": "approveBuilderFee",
+            "builder": agent_address,
+            **extra
+        }
+    else:
+        return {
+            "status": "error",
+            "message": f"Unknown action '{action}'. Valid options: 'approveAgent', 'agentEnableDexAbstraction', 'agentSetAbstraction', 'approveBuilderFee'"
+        }
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
+        return {
+            "status": "error",
+            "message": "Agent management requires HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
+            "action_payload": action_payload,
+            "note": "Configure environment variables and use proper EIP-712 signing for authenticated operations."
+        }
+    
+    payload = {
+        "action": action_payload,
+        "nonce": int(__import__('time').time() * 1000),
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
+    
+    try:
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "action_payload": action_payload,
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
         }
 
 
 @mcp.tool()
 async def validator_action(
     action_type: str,
-    action_payload: str,
-    nonce: Optional[int] = None,
+    action_details: str,
+    nonce: Optional[int] = None
 ) -> dict:
+    """Perform validator or consensus-related actions on Hyperliquid L1,
+    including cSignerAction and cValidatorAction.
+    
+    Use this when the user needs to interact with the Hyperliquid consensus layer,
+    manage validator settings, or perform staking-related operations.
+    
+    action_type options:
+    - 'cSignerAction': Signer-level consensus actions
+    - 'cValidatorAction': Validator-level consensus actions
     """
-    Perform validator or signer actions on Hyperliquid chain.
-    
-    Includes cValidatorAction and cSignerAction. Use this for staking operations,
-    validator management, signer configuration, or governance-related actions
-    on the Hyperliquid L1.
-    
-    Args:
-        action_type: Type of action: 'validator' for cValidatorAction or 'signer' for cSignerAction
-        action_payload: JSON string containing the specific validator or signer action parameters
-                        (e.g., register, unregister, delegate, update signer)
-        nonce: Optional nonce for the transaction. Auto-generated if not provided.
-    
-    Returns:
-        Exchange response with validator/signer action status
-    """
-    if action_type not in ("validator", "signer"):
+    if action_type not in ("cSignerAction", "cValidatorAction"):
         return {
-            "success": False,
-            "error": f"Invalid action_type '{action_type}'. Must be 'validator' or 'signer'.",
+            "status": "error",
+            "message": f"Unknown action_type '{action_type}'. Valid options: 'cSignerAction', 'cValidatorAction'"
         }
-
+    
     try:
-        payload_data = json.loads(action_payload)
-    except json.JSONDecodeError as e:
+        details = json.loads(action_details)
+    except json.JSONDecodeError:
         return {
-            "success": False,
-            "error": f"Invalid JSON in action_payload: {str(e)}",
+            "status": "error",
+            "message": "action_details must be a valid JSON string."
         }
-
-    hl_type = "cValidatorAction" if action_type == "validator" else "cSignerAction"
-
-    action = {
-        "type": hl_type,
-        **payload_data,
+    
+    action_payload = {
+        "type": action_type,
+        **details
     }
-
-    if nonce is None:
-        nonce = get_nonce()
-
+    
+    tx_nonce = nonce if nonce is not None else int(__import__('time').time() * 1000)
+    
+    if not HL_PRIVATE_KEY or not HL_WALLET_ADDRESS:
+        return {
+            "status": "error",
+            "message": "Validator actions require HL_PRIVATE_KEY and HL_WALLET_ADDRESS environment variables to be set.",
+            "action_payload": action_payload,
+            "nonce": tx_nonce,
+            "note": "Configure environment variables and use proper EIP-712 signing for authenticated operations."
+        }
+    
+    payload = {
+        "action": action_payload,
+        "nonce": tx_nonce,
+        "signature": {"r": "0x0", "s": "0x0", "v": 0},
+        "vaultAddress": None
+    }
+    
     try:
-        result = await post_exchange(action, nonce=nonce)
-        return {
-            "success": True,
-            "action": "validator_action",
-            "action_type": action_type,
-            "hl_type": hl_type,
-            "nonce": nonce,
-            "result": result,
-        }
-    except httpx.HTTPStatusError as e:
-        return {
-            "success": False,
-            "error": f"HTTP error: {e.response.status_code}",
-            "detail": e.response.text,
-        }
+        result = await exchange_request(payload)
+        return {"status": "success", "result": result}
     except Exception as e:
         return {
-            "success": False,
-            "error": str(e),
-            "action_payload_sent": action,
-            "note": "Validator/signer action structure built. Production use requires signing via Hyperliquid SDK."
+            "status": "error",
+            "message": str(e),
+            "action_payload": action_payload,
+            "note": "Ensure proper EIP-712 signing is implemented for authenticated requests."
         }
 
 
