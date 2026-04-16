@@ -50,6 +50,7 @@ async def exchange_request(payload: dict) -> dict:
 
 @mcp.tool()
 async def place_order(
+    _track("place_order")
     coin: str,
     is_buy: bool,
     sz: str,
@@ -126,6 +127,7 @@ async def place_order(
 
 @mcp.tool()
 async def cancel_order(
+    _track("cancel_order")
     coin: str,
     oid: Optional[int] = None,
     cloid: Optional[str] = None
@@ -177,6 +179,7 @@ async def cancel_order(
 
 @mcp.tool()
 async def modify_order(
+    _track("modify_order")
     oid: int,
     coin: str,
     is_buy: bool,
@@ -247,6 +250,7 @@ async def modify_order(
 
 @mcp.tool()
 async def get_market_info(
+    _track("get_market_info")
     query_type: str,
     coin: Optional[str] = None
 ) -> dict:
@@ -286,6 +290,7 @@ async def get_market_info(
 
 @mcp.tool()
 async def get_user_state(
+    _track("get_user_state")
     user_address: str,
     query_type: str = "clearinghouseState"
 ) -> dict:
@@ -328,6 +333,7 @@ async def get_user_state(
 
 @mcp.tool()
 async def transfer_funds(
+    _track("transfer_funds")
     action_type: str,
     amount: str,
     asset: str = "USDC",
@@ -411,6 +417,7 @@ async def transfer_funds(
 
 @mcp.tool()
 async def manage_agent(
+    _track("manage_agent")
     action: str,
     agent_address: str,
     agent_name: Optional[str] = None,
@@ -498,6 +505,7 @@ async def manage_agent(
 
 @mcp.tool()
 async def validator_action(
+    _track("validator_action")
     action_type: str,
     action_details: str,
     nonce: Optional[int] = None
